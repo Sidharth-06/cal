@@ -366,6 +366,7 @@ if (boltApp) {
 
     const userId = message.user;
     const channelId = message.channel;
+    const rawText = message.text || "";
 
     console.log(`[Slack] Received message from user ${userId} in channel ${channelId}`);
 
@@ -773,7 +774,6 @@ if (boltApp) {
     }
 
     // ─── FOOD LOGGING HELPERS ──────────────────────────────────────────
-    const rawText = message.text || "";
     if (!rawText.trim()) return; // ignore empty messages
 
     if (/\b(model\s*)?(quota|usage|limit|budget)\b/i.test(rawText)) {
