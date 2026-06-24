@@ -472,96 +472,235 @@ export async function getMemoryContext(slackUserId) {
   return sections.length > 0 ? sections.join('\n\n') : 'No profile memory established yet.';
 }
 
+// ─── INTENT CLASSIFIER — Stage 1 ─────────────────────────────────────────────
+// Maps BART zero-shot labels → internal intent names
+const BART_LABEL_MAP = {
+  'food or drink consumed':          'LOG_FOOD_TEXT',
+  'daily summary or report':         'REQUEST_REPORT',
+  'food suggestion or advice':       'ASK_SUGGESTION',
+  'personal preference allergy goal':'SAVE_MEMORY',
+  'skipped or missed a meal':        'LOG_SKIP',
+  'greeting or general chat':        'GENERAL_CHAT',
+};
+const BART_LABELS = Object.keys(BART_LABEL_MAP);
+
+/**
+ * Stage 1: Fast, deterministic intent classification via BART MNLI.
+ * No prompt engineering — BART is purpose-built for zero-shot classification.
+ */
+async function classifyIntentBART(messageText, slackUserId) {
+  try {
+    const result = await runCFModel('@cf/facebook/bart-large-mnli', {
+      text: messageText,
+      candidate_labels: BART_LABELS,
+    }, { slackUserId, purpose: 'classify' });
+
+    const topLabel = result.labels[0];
+    const topScore = result.scores[0];
+    const intent = BART_LABEL_MAP[topLabel] || 'GENERAL_CHAT';
+    console.log(`[Intent/BART] "${messageText.substring(0, 60)}" → ${intent} (${(topScore * 100).toFixed(1)}%)`);
+    return { intent, score: topScore };
+  } catch (err) {
+    console.error('[Intent/BART] Classification failed, falling back to GENERAL_CHAT:', err.message);
+    return { intent: 'GENERAL_CHAT', score: 0 };
+  }
+}
+
+// ─── EXTRACTION HELPERS — Stage 2 ────────────────────────────────────────────
+// Each function is a focused single-purpose prompt — shorter, faster, more reliable.
+
+async function extractFoodLogs(messageText, profile, memoryContext, todayStats, slackUserId) {
+  const { totalCalories, totalProtein, totalCarbs, totalFats } = todayStats;
+  const prompt = `You are a nutrition assistant. Extract every food and drink item from the message below and estimate their nutrition.
+
+Message: "${messageText}"
+
+User memory: ${memoryContext}
+Daily goal: ${profile.dailyGoal} kcal | P: ${profile.macroTargets.protein}g | C: ${profile.macroTargets.carbs}g | F: ${profile.macroTargets.fats}g
+Today so far: ${totalCalories} kcal | P: ${totalProtein}g | C: ${totalCarbs}g | F: ${totalFats}g
+
+For each food item, assign a category:
+- Breakfast: breakfast, morning, first meal, woke up
+- Lunch: lunch, afternoon, noon, midday
+- Dinner: dinner, night, evening, late meal
+- Beverage: coffee, tea, juice, soda, alcohol, water, smoothie
+- Snack: anything else or unclear
+
+Return ONLY a raw JSON array. First char [, last char ]. One object per food item:
+[{"foodName":"","category":"Snack","calories":0,"protein":0,"carbs":0,"fats":0,"insight":""}]`;
+
+  const result = await runCFModel('@cf/meta/llama-3.1-8b-instruct-fp8-fast', {
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 700,
+  }, { slackUserId, purpose: 'food_extract' });
+
+  const text = result.response.trim();
+  console.log(`[Intent/Extract] Food extraction raw (200 chars): ${text.substring(0, 200)}`);
+
+  // Try array form first, then object wrapper
+  const arrMatch = text.match(/\[[\s\S]*\]/);
+  if (arrMatch) {
+    try {
+      const arr = JSON.parse(arrMatch[0]);
+      const foodLogs = arr
+        .map(f => normalizeFoodLog(f))
+        .filter(f => f.foodName);
+      return { foodLogs, foodLog: foodLogs[0] || null };
+    } catch { /* fall through */ }
+  }
+  // Fallback: try wrapped object
+  const objMatch = text.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try {
+      const obj = JSON.parse(objMatch[0]);
+      const foodLogs = Array.isArray(obj.foodLogs)
+        ? obj.foodLogs.map(f => normalizeFoodLog(f)).filter(f => f.foodName)
+        : [normalizeFoodLog(obj)].filter(f => f.foodName);
+      return { foodLogs, foodLog: foodLogs[0] || null };
+    } catch { /* fall through */ }
+  }
+  console.warn('[Intent/Extract] Food extraction returned no parseable JSON.');
+  return { foodLogs: [], foodLog: null };
+}
+
+async function extractSuggestion(profile, memoryContext, todayStats, slackUserId) {
+  const { totalCalories, totalProtein, totalCarbs, totalFats } = todayStats;
+  const remaining = profile.dailyGoal - totalCalories;
+  const prompt = `You are a supportive dietician. Give a short, personalized meal suggestion.
+
+User memory: ${memoryContext}
+Remaining calories today: ${remaining} kcal
+Remaining: P ${profile.macroTargets.protein - totalProtein}g | C ${profile.macroTargets.carbs - totalCarbs}g | F ${profile.macroTargets.fats - totalFats}g
+
+Write 2-3 sentences. Be specific, friendly, and practical. Return only the suggestion text.`;
+
+  const result = await runCFModel('@cf/meta/llama-3.1-8b-instruct-fp8-fast', {
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 250,
+  }, { slackUserId, purpose: 'suggestion' });
+
+  return result.response.trim();
+}
+
+async function extractMemoryFact(messageText, slackUserId) {
+  const prompt = `From the message below, extract the key personal fact the user wants to save (preference, allergy, goal, or habit). Return only the fact as a short plain sentence. If nothing is extractable, return "none".
+
+Message: "${messageText}"`;
+
+  const result = await runCFModel('@cf/meta/llama-3.1-8b-instruct-fp8-fast', {
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 100,
+  }, { slackUserId, purpose: 'memory_extract' });
+
+  const fact = result.response.trim();
+  return fact.toLowerCase() === 'none' ? null : fact;
+}
+
+async function generateChatReply(messageText, memoryContext, slackUserId) {
+  const prompt = `You are a friendly nutrition tracking assistant. Reply briefly and naturally to this message.
+
+User memory: ${memoryContext}
+Message: "${messageText}"
+
+Keep it under 2 sentences. Be warm and helpful. Return only the reply.`;
+
+  const result = await runCFModel('@cf/meta/llama-3.1-8b-instruct-fp8-fast', {
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 150,
+  }, { slackUserId, purpose: 'chat_reply' });
+
+  return result.response.trim();
+}
+
+function extractSkippedMeal(messageText) {
+  if (/breakfast/i.test(messageText)) return 'Breakfast';
+  if (/lunch/i.test(messageText)) return 'Lunch';
+  if (/dinner/i.test(messageText)) return 'Dinner';
+  return 'a meal';
+}
+
 /**
  * Interpret the user's free-form text message and determine what they want.
- * Returns a structured intent object so the bot can act intelligently
- * without requiring any specific commands.
+ *
+ * Two-stage pipeline:
+ *   Stage 1 — BART MNLI:  Fast, dedicated zero-shot classifier → intent label
+ *   Stage 2 — Llama 8B:   Focused extraction prompt (only for intents that need it)
  *
  * Intents:
- *  - LOG_FOOD_TEXT   : User described food they ate (e.g. "just had dal rice")
- *  - REQUEST_REPORT  : User wants to know how they're doing today
- *  - ASK_SUGGESTION  : User wants food/meal advice or is asking what to eat
+ *  - LOG_FOOD_TEXT   : User described food they ate
+ *  - REQUEST_REPORT  : User wants a daily summary
+ *  - ASK_SUGGESTION  : User wants meal advice
  *  - SAVE_MEMORY     : User shared a preference, allergy, goal, or habit
- *  - LOG_SKIP        : User mentioned they skipped a meal
- *  - GENERAL_CHAT    : Casual message, greeting, or something else
+ *  - LOG_SKIP        : User mentioned skipping a meal
+ *  - GENERAL_CHAT    : Casual message, greeting, or anything else
  */
 export async function interpretMessage(slackUserId, messageText) {
-  const profile = await db.getUserProfile(slackUserId);
-  const memoryContext = await getMemoryContext(slackUserId);
+  // Shared context used by stage-2 extraction helpers
+  const [profile, memoryContext, allLogs] = await Promise.all([
+    db.getUserProfile(slackUserId),
+    getMemoryContext(slackUserId),
+    db.getUserLogs(slackUserId),
+  ]);
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const todayLogs = (await db.getUserLogs(slackUserId))
-    .filter(log => new Date(log.timestamp) >= todayStart);
-  const totalCalories = todayLogs.reduce((sum, f) => sum + f.calories, 0);
-  const totalProtein  = todayLogs.reduce((sum, f) => sum + (f.protein || 0), 0);
-  const totalCarbs    = todayLogs.reduce((sum, f) => sum + (f.carbs || 0), 0);
-  const totalFats     = todayLogs.reduce((sum, f) => sum + (f.fats || 0), 0);
+  const todayLogs = allLogs.filter(log => new Date(log.timestamp) >= todayStart);
 
-  const prompt = `You are an intelligent assistant for a nutrition tracking Slack bot. Analyze the user's message and decide what intent it expresses.
+  const todayStats = {
+    totalCalories: todayLogs.reduce((s, f) => s + f.calories, 0),
+    totalProtein:  todayLogs.reduce((s, f) => s + (f.protein || 0), 0),
+    totalCarbs:    todayLogs.reduce((s, f) => s + (f.carbs || 0), 0),
+    totalFats:     todayLogs.reduce((s, f) => s + (f.fats || 0), 0),
+  };
 
-User's message: "${messageText}"
+  // ── Stage 1: Classify with BART MNLI ─────────────────────────────────────
+  const { intent } = await classifyIntentBART(messageText, slackUserId);
 
-User's memory/profile:
-${memoryContext}
-
-Today's food log so far:
-${todayLogs.map(f => `- [${f.category || 'Snack'}] ${f.name} (${f.calories} kcal)`).join('\n') || 'Nothing logged yet.'}
-
-Today's totals: ${totalCalories} kcal | Protein: ${totalProtein}g | Carbs: ${totalCarbs}g | Fats: ${totalFats}g
-Daily calorie goal: ${profile.dailyGoal} kcal
-
-Classify the intent as ONE of:
-- LOG_FOOD_TEXT   : User described food they ate (e.g. "had biryani for lunch", "just ate an apple", "had a coffee")
-- REQUEST_REPORT  : User wants a summary/report of today (e.g. "how am I doing?", "what's my count?", "summary")
-- ASK_SUGGESTION  : User wants advice on what to eat, or asks a nutrition question (e.g. "what should I eat?", "I'm hungry", "suggest something healthy")
-- SAVE_MEMORY     : User shared a personal fact - preference, allergy, goal, habit (e.g. "I hate onions", "going keto", "I'm lactose intolerant", "trying to lose 5kg")
-- LOG_SKIP        : User mentioned skipping or missing a meal (e.g. "skipped lunch", "didn't eat breakfast")
-- GENERAL_CHAT    : Greeting, casual talk, thanks, or anything else
-
-CRITICAL RULES — read carefully:
-- If the user's message mentions ANY food, drink, or meal — even alongside casual lead-in phrases like "Ok I'll brief my day..." or "Here's what I had..." — classify it as LOG_FOOD_TEXT.
-- Messages like "Ok I'll brief my day. Breakfast - 2 idli. Lunch - rice and curry." are LOG_FOOD_TEXT, NOT GENERAL_CHAT.
-- Never classify food descriptions as GENERAL_CHAT. When in doubt and food is mentioned, always pick LOG_FOOD_TEXT.
-- For GENERAL_CHAT, always write a short, friendly chatReply — never leave chatReply as null.
-
-For LOG_FOOD_TEXT, extract every distinct food or drink the user says they consumed and estimate the nutrition details as best you can from the text description.
-For LOG_FOOD_TEXT, place each item on the user's eating timeline using the user's words:
-- Breakfast: breakfast, morning, woke up, early meal, first meal
-- Lunch: lunch, afternoon, noon, midday
-- Dinner: dinner, night, evening, late meal
-- Beverage: drinks like coffee, tea, juice, soda, alcohol, smoothies
-- Snack: snacks, small bites, cravings, or unclear timing
-If the user mentions multiple timeline points in one message (example: "idli for breakfast and dal rice for lunch"), return one foodLogs item per food with the matching category.
-For ASK_SUGGESTION, also generate a smart, personalized suggestion based on their memory and today's macros.
-For LOG_SKIP, note which meal was skipped.
-
-Your response must be a single raw JSON object. No text before or after. First character {, last character }.
-Use null for fields not relevant to the detected intent:
-{"intent":"GENERAL_CHAT","confidence":"high","foodLogs":[{"foodName":"","category":"Snack","ingredients":[],"calories":0,"protein":0,"carbs":0,"fats":0,"insight":""}],"foodLog":null,"suggestion":null,"memoryFact":null,"skippedMeal":null,"chatReply":null}`;
-
+  // ── Stage 2: Focused extraction per intent ────────────────────────────────
   try {
-    const result = await runCFModel('@cf/meta/llama-3.1-8b-instruct-fp8-fast', {
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 900
-    }, { slackUserId, purpose: 'intent' });
+    switch (intent) {
 
-    const text = result.response.trim();
-    console.log(`[Intent] Raw response (first 300 chars): ${text.substring(0, 300)}`);
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = normalizeIntentResult(JSON.parse(jsonMatch[0]));
-      console.log(`[Intent] Classified as: ${parsed.intent} | foodLogs: ${parsed.foodLogs?.length || 0}`);
-      return parsed;
+      case 'LOG_FOOD_TEXT': {
+        const { foodLogs, foodLog } = await extractFoodLogs(
+          messageText, profile, memoryContext, todayStats, slackUserId
+        );
+        return normalizeIntentResult({ intent, foodLogs, foodLog });
+      }
+
+      case 'REQUEST_REPORT':
+        return { intent, foodLogs: [], foodLog: null };
+
+      case 'ASK_SUGGESTION': {
+        const suggestion = await extractSuggestion(
+          profile, memoryContext, todayStats, slackUserId
+        );
+        return { intent, suggestion, foodLogs: [], foodLog: null };
+      }
+
+      case 'SAVE_MEMORY': {
+        const memoryFact = await extractMemoryFact(messageText, slackUserId);
+        return { intent, memoryFact, foodLogs: [], foodLog: null };
+      }
+
+      case 'LOG_SKIP': {
+        const skippedMeal = extractSkippedMeal(messageText);
+        return { intent, skippedMeal, foodLogs: [], foodLog: null };
+      }
+
+      default: {
+        // GENERAL_CHAT — generate a proper reply
+        const chatReply = await generateChatReply(
+          messageText, memoryContext, slackUserId
+        );
+        return { intent: 'GENERAL_CHAT', chatReply, foodLogs: [], foodLog: null };
+      }
     }
-    // Model returned plain text instead of JSON — treat the text as a chat reply
-    console.warn('[Intent] Model did not return JSON. Using text as chatReply.');
-    return { intent: 'GENERAL_CHAT', chatReply: text || "I didn't quite catch that — try rephrasing or send me a photo of your meal! 📸" };
   } catch (err) {
-    console.error('[Intent] Failed to classify message intent:', err.message);
-    return { intent: 'GENERAL_CHAT', chatReply: "I hit a snag processing that. Try again in a moment! 🙏" };
+    console.error(`[Intent] Stage-2 extraction failed for intent "${intent}":`, err.message);
+    return { intent: 'GENERAL_CHAT', chatReply: "I hit a snag processing that. Try again in a moment! 🙏", foodLogs: [], foodLog: null };
   }
 }
+
 
 /**
  * Add a new fact to the user's memory.
