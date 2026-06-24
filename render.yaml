@@ -22,5 +22,4 @@ services:
         sync: false
       - key: SUPABASE_ANON_KEY
         sync: false
-      - key: MODEL_DAILY_CALL_LIMIT
-        value: "10"
+

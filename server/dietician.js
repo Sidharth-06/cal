@@ -22,31 +22,21 @@ function estimatePayloadTokens(payload, result) {
 }
 
 export async function getModelQuotaStatus(slackUserId) {
-  const limit = getDailyModelCallLimit();
   const usage = await db.getModelUsage(slackUserId);
   const used = usage.calls || 0;
-  const remaining = Math.max(0, limit - used);
-  const percent = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
   return {
-    limit,
+    limit: 0,
     used,
-    remaining,
-    percent,
+    remaining: 999999,
+    percent: 0,
     estimatedTokens: usage.estimatedTokens || 0,
   };
 }
 
 export async function hasModelQuota(slackUserId) {
-  return (await getModelQuotaStatus(slackUserId)).remaining > 0;
+  return true;
 }
 
-async function createQuotaError(slackUserId) {
-  const quota = await getModelQuotaStatus(slackUserId);
-  const err = new Error(`Daily model call limit reached (${quota.used}/${quota.limit}).`);
-  err.code = 'MODEL_QUOTA_EXCEEDED';
-  err.quota = quota;
-  return err;
-}
 
 /**
  * Execute inference on Cloudflare Workers AI REST API.
@@ -57,10 +47,6 @@ async function runCFModel(modelId, payload, metadata = {}) {
 
   if (!token || !accountId) {
     throw new Error('Cloudflare credentials not configured. Please set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in .env.');
-  }
-
-  if (metadata.slackUserId && !(await hasModelQuota(metadata.slackUserId))) {
-    throw await createQuotaError(metadata.slackUserId);
   }
 
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${modelId}`;

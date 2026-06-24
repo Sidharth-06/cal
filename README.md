@@ -46,7 +46,6 @@ SUPABASE_ANON_KEY=...
 
 # App Config
 PORT=3000
-MODEL_DAILY_CALL_LIMIT=50
 ```
 
 ---

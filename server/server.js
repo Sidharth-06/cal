@@ -78,7 +78,7 @@ function makeBar(percent, width = 10) {
 
 async function modelQuotaLine(userId) {
   const quota = await getModelQuotaStatus(userId);
-  return `🤖 *Model quota:* ${quota.used}/${quota.limit} calls today  \`${makeBar(quota.percent)}\` ${quota.percent}% used`;
+  return `🤖 *Model usage:* ${quota.used} calls today`;
 }
 
 async function progressBlocks(userId, title, percent, statusText) {
@@ -89,23 +89,10 @@ async function progressBlocks(userId, title, percent, statusText) {
         type: "mrkdwn",
         text: `${title}\n\`${makeBar(percent)}\` ${percent}% — ${statusText}`
       }
-    },
-    {
-      type: "context",
-      elements: [{ type: "mrkdwn", text: await modelQuotaLine(userId) }]
     }
   ];
 }
 
-async function quotaLimitText(userId) {
-  const quota = await getModelQuotaStatus(userId);
-  const quotaLine = await modelQuotaLine(userId);
-  return `⚠️ *Daily model limit reached.*\n\n${quotaLine}\nYou have ${quota.remaining} calls remaining today. Try again after the daily reset, or increase \`MODEL_DAILY_CALL_LIMIT\` in your server environment.`;
-}
-
-function isModelQuotaError(err) {
-  return err?.code === 'MODEL_QUOTA_EXCEEDED';
-}
 
 function shouldHandleSlackMessage(message) {
   if (!message?.user || !message?.channel || !message?.ts) return false;
@@ -374,15 +361,6 @@ if (boltApp) {
     if (message.files && message.files.length > 0) {
       const imageFile = message.files.find(file => file.mimetype.startsWith('image/'));
       if (imageFile) {
-        if (!hasModelQuota(userId)) {
-          await client.chat.postMessage({
-            channel: channelId,
-            text: "Daily model limit reached",
-            blocks: [{ type: 'section', text: { type: 'mrkdwn', text: await quotaLimitText(userId) } }]
-          });
-          return;
-        }
-
         // Add a reaction to show we are processing
         try {
           await client.reactions.add({
@@ -560,7 +538,7 @@ if (boltApp) {
                 type: 'context',
                 elements: [{
                   type: 'mrkdwn',
-                  text: `📅 *Today's Progress* — ${totalCalories} / ${profile.dailyGoal} kcal  \`${progressBar}\` ${pct}%\nProtein: ${totalProtein}g | Carbs: ${totalCarbs}g | Fats: ${totalFats}g  •  ${remaining > 0 ? `${remaining} kcal remaining` : `🚨 ${Math.abs(remaining)} kcal over goal`}\n${await modelQuotaLine(userId)}`
+                  text: `📅 *Today's Progress* — ${totalCalories} / ${profile.dailyGoal} kcal  \`${progressBar}\` ${pct}%\nProtein: ${totalProtein}g | Carbs: ${totalCarbs}g | Fats: ${totalFats}g  •  ${remaining > 0 ? `${remaining} kcal remaining` : `🚨 ${Math.abs(remaining)} kcal over goal`}`
                 }]
               }
             ]
@@ -577,15 +555,13 @@ if (boltApp) {
 
         } catch (err) {
           console.error('[Slack] Vision log error:', err);
-          const errorText = isModelQuotaError(err)
-            ? await quotaLimitText(userId)
-            : "⚠️ *Oops, I hit a snag trying to analyze that meal picture.* Please make sure the photo is clear or try again!";
+          const errorText = "⚠️ *Oops, I hit a snag trying to analyze that meal picture.* Please make sure the photo is clear or try again!";
           if (loadingMsg && loadingMsg.ts) {
             try {
               await client.chat.update({
                 channel: channelId,
                 ts: loadingMsg.ts,
-                text: isModelQuotaError(err) ? "Daily model limit reached" : "Meal analysis failed",
+                text: "Meal analysis failed",
                 blocks: [
                   {
                     type: "section",
@@ -780,13 +756,13 @@ if (boltApp) {
       const quota = await getModelQuotaStatus(userId);
       await client.chat.postMessage({
         channel: channelId,
-        text: `Model quota: ${quota.used}/${quota.limit} calls used today`,
+        text: `Model usage: ${quota.used} calls used today`,
         blocks: [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `${await modelQuotaLine(userId)}\n${quota.remaining} calls remaining. Estimated tokens today: ${quota.estimatedTokens}.`
+              text: `🤖 *Model usage:* ${quota.used} calls today (no daily limit!)\nEstimated tokens today: ${quota.estimatedTokens}.`
             }
           }
         ]
@@ -794,14 +770,6 @@ if (boltApp) {
       return;
     }
 
-    if (!(await hasModelQuota(userId))) {
-      await client.chat.postMessage({
-        channel: channelId,
-        text: "Daily model limit reached",
-        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: await quotaLimitText(userId) } }]
-      });
-      return;
-    }
 
     // Show "thinking" reaction while processing
     try {
@@ -892,7 +860,7 @@ if (boltApp) {
               type: 'context',
               elements: [{
                 type: 'mrkdwn',
-                 text: `📊 *Today so far:* ${totalCalories} / ${profile.dailyGoal} kcal  •  ${remaining > 0 ? `${remaining} kcal remaining` : `${Math.abs(remaining)} kcal over goal 🚨`}\n${await modelQuotaLine(userId)}`
+                 text: `📊 *Today so far:* ${totalCalories} / ${profile.dailyGoal} kcal  •  ${remaining > 0 ? `${remaining} kcal remaining` : `${Math.abs(remaining)} kcal over goal 🚨`}`
               }]
             }
           ]
@@ -931,10 +899,6 @@ if (boltApp) {
             {
               type: 'section',
               text: { type: 'mrkdwn', text: `🥗 *Here's my suggestion for you:*\n\n${intent.suggestion}` }
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: await modelQuotaLine(userId) }]
             }
           ]
         });
@@ -956,10 +920,6 @@ if (boltApp) {
             {
               type: 'section',
               text: { type: 'mrkdwn', text: `🧠 *Got it — saved to memory!*\n\nI'll keep "_${intent.memoryFact}_" in mind for all future meal analysis and recommendations.` }
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: await modelQuotaLine(userId) }]
             }
           ]
         });
@@ -983,10 +943,6 @@ if (boltApp) {
             {
               type: 'section',
               text: { type: 'mrkdwn', text: `⚠️ Noted — I've logged that you skipped ${meal} today. I'll take that into account in your report tonight. Remember, even a light snack is better than skipping! 💪` }
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: await modelQuotaLine(userId) }]
             }
           ]
         });
@@ -1003,10 +959,6 @@ if (boltApp) {
             {
               type: 'section',
               text: { type: 'mrkdwn', text: intent.chatReply }
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: await modelQuotaLine(userId) }]
             }
           ]
         });
@@ -1019,10 +971,6 @@ if (boltApp) {
             {
               type: 'section',
               text: { type: 'mrkdwn', text: fallbackText }
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: await modelQuotaLine(userId) }]
             }
           ]
         });
@@ -1035,11 +983,9 @@ if (boltApp) {
         await client.reactions.remove({ channel: channelId, timestamp: message.ts, name: 'thinking_face' });
         await client.reactions.add({ channel: channelId, timestamp: message.ts, name: 'warning' });
       } catch { /* ignore */ }
-      const errorText = isModelQuotaError(intentErr)
-        ? await quotaLimitText(userId)
-        : "⚠️ I hit a snag processing that. Try again in a moment!";
+      const errorText = "⚠️ I hit a snag processing that. Try again in a moment!";
       await publishFinalMessage(client, channelId, textProgressMsg, say, {
-        text: isModelQuotaError(intentErr) ? "Daily model limit reached" : "Message processing failed",
+        text: "Message processing failed",
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text: errorText } }]
       });
     }
