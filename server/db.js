@@ -51,13 +51,18 @@ function ensureDefaults(profile) {
   };
 }
 
+const memLogs = [];
+const memProfiles = {};
+
 function todayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
 export const db = {
   async getUserLogs(slackUserId) {
-    if (!supabase) return [];
+    if (!supabase) {
+      return memLogs.filter(l => l.slackUserId === slackUserId);
+    }
     const { data, error } = await supabase
       .from('logs')
       .select('*')
@@ -93,12 +98,21 @@ export const db = {
         timestamp: newLog.timestamp,
       });
       if (error) console.error('[DB] addLog error:', error.message);
+    } else {
+      memLogs.push(newLog);
     }
     return newLog;
   },
 
   async deleteLog(slackUserId, logId) {
-    if (!supabase) return false;
+    if (!supabase) {
+      const idx = memLogs.findIndex(l => l.id === logId && l.slackUserId === slackUserId);
+      if (idx !== -1) {
+        memLogs.splice(idx, 1);
+        return true;
+      }
+      return false;
+    }
     const { error } = await supabase
       .from('logs')
       .delete()
@@ -109,7 +123,12 @@ export const db = {
   },
 
   async getUserProfile(slackUserId) {
-    if (!supabase) return ensureDefaults(null);
+    if (!supabase) {
+      if (!memProfiles[slackUserId]) {
+        memProfiles[slackUserId] = ensureDefaults(null);
+      }
+      return memProfiles[slackUserId];
+    }
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
@@ -164,6 +183,8 @@ export const db = {
         updated_at: new Date().toISOString(),
       });
       if (error) console.error('[DB] updateUserProfile error:', error.message);
+    } else {
+      memProfiles[slackUserId] = updated;
     }
     return updated;
   },
@@ -211,6 +232,8 @@ export const db = {
         updated_at: new Date().toISOString(),
       });
       if (error) console.error('[DB] recordModelUsage error:', error.message);
+    } else {
+      memProfiles[slackUserId] = updated;
     }
     return today;
   },
@@ -226,12 +249,15 @@ export const db = {
         updated_at: new Date().toISOString(),
       });
       if (error) console.error('[DB] addWaterIntake error:', error.message);
+    } else {
+      memProfiles[slackUserId] = updated;
     }
     return updated;
   },
 
   async resetWaterIntake(slackUserId) {
-    const updated = { waterIntakeMl: 0 };
+    const current = await this.getUserProfile(slackUserId);
+    const updated = { ...current, waterIntakeMl: 0 };
     if (supabase) {
       const { error } = await supabase.from('profiles').upsert({
         slack_user_id: slackUserId,
@@ -239,6 +265,8 @@ export const db = {
         updated_at: new Date().toISOString(),
       });
       if (error) console.error('[DB] resetWaterIntake error:', error.message);
+    } else {
+      memProfiles[slackUserId] = updated;
     }
     return updated;
   },
@@ -253,12 +281,14 @@ export const db = {
         updated_at: new Date().toISOString(),
       });
       if (error) console.error('[DB] updateReminderTimes error:', error.message);
+    } else {
+      memProfiles[slackUserId] = updated;
     }
     return updated;
   },
 
   async getAllUserIds() {
-    if (!supabase) return [];
+    if (!supabase) return Object.keys(memProfiles);
     const { data, error } = await supabase
       .from('profiles')
       .select('slack_user_id');
