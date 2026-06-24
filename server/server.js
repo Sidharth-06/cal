@@ -1011,13 +1011,14 @@ if (boltApp) {
           ]
         });
       } else {
-        const helpText = `👋 *Hey! I'm your co-living dietician.* 🍎\n\nJust *send me a photo* of what you're eating and I'll log it automatically. You can also tell me what you ate in plain text, share a preference, or just ask how you're doing today!`;
+        // Catch-all: model returned an unrecognised intent or empty chatReply
+        const fallbackText = `Hmm, I didn't quite understand that. Try:\n• Describing what you ate: _"had 2 idlis for breakfast"_\n• Sending a *photo* of your meal 📸\n• Asking _"how am I doing today?"_ for a summary`;
         await publishFinalMessage(client, channelId, textProgressMsg, say, {
-          text: "CalTrack help",
+          text: "I didn't understand that",
           blocks: [
             {
               type: 'section',
-              text: { type: 'mrkdwn', text: helpText }
+              text: { type: 'mrkdwn', text: fallbackText }
             },
             {
               type: 'context',

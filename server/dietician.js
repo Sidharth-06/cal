@@ -519,6 +519,12 @@ Classify the intent as ONE of:
 - LOG_SKIP        : User mentioned skipping or missing a meal (e.g. "skipped lunch", "didn't eat breakfast")
 - GENERAL_CHAT    : Greeting, casual talk, thanks, or anything else
 
+CRITICAL RULES — read carefully:
+- If the user's message mentions ANY food, drink, or meal — even alongside casual lead-in phrases like "Ok I'll brief my day..." or "Here's what I had..." — classify it as LOG_FOOD_TEXT.
+- Messages like "Ok I'll brief my day. Breakfast - 2 idli. Lunch - rice and curry." are LOG_FOOD_TEXT, NOT GENERAL_CHAT.
+- Never classify food descriptions as GENERAL_CHAT. When in doubt and food is mentioned, always pick LOG_FOOD_TEXT.
+- For GENERAL_CHAT, always write a short, friendly chatReply — never leave chatReply as null.
+
 For LOG_FOOD_TEXT, extract every distinct food or drink the user says they consumed and estimate the nutrition details as best you can from the text description.
 For LOG_FOOD_TEXT, place each item on the user's eating timeline using the user's words:
 - Breakfast: breakfast, morning, woke up, early meal, first meal
@@ -537,19 +543,23 @@ Use null for fields not relevant to the detected intent:
   try {
     const result = await runCFModel('@cf/meta/llama-3.1-8b-instruct-fp8-fast', {
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 600
+      max_tokens: 900
     }, { slackUserId, purpose: 'intent' });
 
     const text = result.response.trim();
+    console.log(`[Intent] Raw response (first 300 chars): ${text.substring(0, 300)}`);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      return normalizeIntentResult(JSON.parse(jsonMatch[0]));
+      const parsed = normalizeIntentResult(JSON.parse(jsonMatch[0]));
+      console.log(`[Intent] Classified as: ${parsed.intent} | foodLogs: ${parsed.foodLogs?.length || 0}`);
+      return parsed;
     }
-    // If parsing fails, fall back to general chat
-    return { intent: 'GENERAL_CHAT', chatReply: result.response.trim() };
+    // Model returned plain text instead of JSON — treat the text as a chat reply
+    console.warn('[Intent] Model did not return JSON. Using text as chatReply.');
+    return { intent: 'GENERAL_CHAT', chatReply: text || "I didn't quite catch that — try rephrasing or send me a photo of your meal! 📸" };
   } catch (err) {
     console.error('[Intent] Failed to classify message intent:', err.message);
-    return { intent: 'GENERAL_CHAT', chatReply: null };
+    return { intent: 'GENERAL_CHAT', chatReply: "I hit a snag processing that. Try again in a moment! 🙏" };
   }
 }
 
