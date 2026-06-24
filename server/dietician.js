@@ -84,7 +84,7 @@ async function runCFModel(modelId, payload, metadata = {}) {
   } finally {
     if (metadata.slackUserId) {
       try {
-        db.recordModelUsage(metadata.slackUserId, {
+        await db.recordModelUsage(metadata.slackUserId, {
           modelId,
           purpose: metadata.purpose,
           estimatedTokens: estimatePayloadTokens(payload, undefined),
@@ -452,7 +452,7 @@ export async function getMemoryContext(slackUserId) {
 
   // Fallback to local file-based memory
   console.log(`[Memory] Fetching local memory from db.json for ${slackUserId}`);
-  const profile = db.getUserProfile(slackUserId);
+  const profile = await db.getUserProfile(slackUserId);
   const mem = profile.dieticianMemory || {};
   
   const sections = [];
@@ -486,12 +486,12 @@ export async function getMemoryContext(slackUserId) {
  *  - GENERAL_CHAT    : Casual message, greeting, or something else
  */
 export async function interpretMessage(slackUserId, messageText) {
-  const profile = db.getUserProfile(slackUserId);
+  const profile = await db.getUserProfile(slackUserId);
   const memoryContext = await getMemoryContext(slackUserId);
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const todayLogs = db.getUserLogs(slackUserId)
+  const todayLogs = (await db.getUserLogs(slackUserId))
     .filter(log => new Date(log.timestamp) >= todayStart);
   const totalCalories = todayLogs.reduce((sum, f) => sum + f.calories, 0);
   const totalProtein  = todayLogs.reduce((sum, f) => sum + (f.protein || 0), 0);
@@ -581,7 +581,7 @@ export async function addMemoryFact(slackUserId, factText) {
 
   // Fallback to local file-based memory
   console.log(`[Memory] Saving local memory fact for ${slackUserId}: "${factText}"`);
-  const profile = db.getUserProfile(slackUserId);
+  const profile = await db.getUserProfile(slackUserId);
   const mem = profile.dieticianMemory || { preferences: [], allergies: [], habits: [], milestones: [], rawMemoryLog: [] };
   
   if (!mem.rawMemoryLog) mem.rawMemoryLog = [];
@@ -602,13 +602,13 @@ Integrate the new note into the memory structure categorizing it under 'preferen
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsedMem = JSON.parse(jsonMatch[0]);
-      db.updateUserMemory(slackUserId, parsedMem);
+      await db.updateUserMemory(slackUserId, parsedMem);
     } else {
-      db.updateUserMemory(slackUserId, mem);
+      await db.updateUserMemory(slackUserId, mem);
     }
   } catch (err) {
     console.error('[Memory] Local memory categorization pass failed:', err.message);
-    db.updateUserMemory(slackUserId, mem);
+    await db.updateUserMemory(slackUserId, mem);
   }
 }
 
@@ -617,7 +617,7 @@ Integrate the new note into the memory structure categorizing it under 'preferen
  * Returns macros, micronutrients, health score, allergens, cuisine type, and more.
  */
 export async function analyzeFoodImage(slackUserId, base64Image, mimetype, promptNotes = "", onProgress = null) {
-  const profile = db.getUserProfile(slackUserId);
+  const profile = await db.getUserProfile(slackUserId);
   const memoryContext = await getMemoryContext(slackUserId);
 
   const imageBytes = Array.from(Buffer.from(base64Image, 'base64'));
