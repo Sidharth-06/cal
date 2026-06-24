@@ -1,4 +1,3 @@
-/* global process, Buffer */
 import express from 'express';
 import cors from 'cors';
 import pkg from '@slack/bolt';
