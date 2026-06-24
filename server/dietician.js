@@ -5,7 +5,7 @@ import { db } from './db.js';
 const getCFToken = () => process.env.CLOUDFLARE_API_TOKEN;
 const getCFAccountId = () => process.env.CLOUDFLARE_ACCOUNT_ID;
 const getMem0ApiKey = () => process.env.MEM0_API_KEY;
-const getDailyModelCallLimit = () => Number(process.env.MODEL_DAILY_CALL_LIMIT || 100);
+const getDailyModelCallLimit = () => Number(process.env.MODEL_DAILY_CALL_LIMIT || 200);
 
 function estimatePayloadTokens(payload, result) {
   const textParts = [];
